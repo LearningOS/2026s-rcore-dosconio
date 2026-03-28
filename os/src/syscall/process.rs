@@ -8,7 +8,7 @@ use crate::{
         change_program_brk, exit_current_and_run_next, suspend_current_and_run_next, TaskStatus,
     },
 
-	mm::translated_byte_buffer, task::{
+	mm::*, task::{
         current_user_token, get_syscall_times_of, do_task_mmap, do_task_munmap
     }, timer::{/*get_time,*/ get_time_us}
 };
@@ -65,27 +65,30 @@ pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
 }
 
 pub fn sys_trace(trace_request: usize, id: usize, data: usize) -> isize {
+    let token = current_user_token();
+    let page_table = PageTable::from_token(token);
+    let vpn = VirtAddr::from(id).floor();
+    
     match trace_request {
         0 => { // Read
-            let token = current_user_token();
-            let buffers = translated_byte_buffer(token, id as *const u8, 1);
-            if buffers.is_empty() {
+            let pte = page_table.translate(vpn);
+            if pte.is_none() || !pte.unwrap().readable() || !pte.unwrap().flags().contains(PTEFlags::U) {
                 return -1;
             }
-            buffers[0][0] as isize
+            let buffers = translated_byte_buffer(token, id as *const u8, 1);
+            if buffers.is_empty() { -1 } else { buffers[0][0] as isize }
         }
         1 => { // Write
-            let token = current_user_token();
-            let mut buffers = translated_byte_buffer(token, id as *mut u8, 1);
-            if buffers.is_empty() {
+            let pte = page_table.translate(vpn);
+            if pte.is_none() || !pte.unwrap().writable() || !pte.unwrap().flags().contains(PTEFlags::U) {
                 return -1;
             }
-            unsafe {
-                buffers[0][0] = (data & 0xFF) as u8;
-            }
+            let mut buffers = translated_byte_buffer(token, id as *mut u8, 1);
+            if buffers.is_empty() { return -1; }
+            unsafe { buffers[0][0] = (data & 0xFF) as u8; }
             0
         }
-        2 => { // Query
+        2 => { // Query ... 
             if id >= MAX_SYSCALL_NUM {
                 return -1;
             }
@@ -119,6 +122,7 @@ pub fn sys_munmap(_start: usize, _len: usize) -> isize {
     if _len == 0 {
         return 0;//{ISSUE}
     }
+    let _len = (_len + 0xfff) & !0xfff;
     //info!(">>>>>>>>>{:#x}!!{:#x}", _start, _start + _len);// any info/error! here will stuck system
     if do_task_munmap(_start, _len) { 0 } else { -1 }
 }
