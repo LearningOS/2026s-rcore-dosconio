@@ -9,11 +9,14 @@
 //! Be careful when you see `__switch` ASM function in `switch.S`. Control flow around this function
 //! might not be what you expect.
 
+#![allow(warnings)]//{TEMP}
+
 mod context;
 mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
+use crate::config::MAX_SYSCALL_NUM;
 use crate::loader::{get_app_data, get_num_app};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
@@ -23,6 +26,10 @@ use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
 
 pub use context::TaskContext;
+
+use crate::mm::{
+    MapPermission, VirtAddr
+};
 
 /// The task manager, where all the tasks are managed.
 ///
@@ -153,6 +160,77 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    /// Get start time
+    fn get_start_time(&self) -> isize {
+        let inner = self.inner.exclusive_access();
+        let res = inner.tasks[inner.current_task].start_time;
+        drop(inner);
+        res
+    }
+
+    /// Increase syscall times
+    fn increase_syscall_times(&self, callno: usize) {
+        if callno >= MAX_SYSCALL_NUM {
+            panic!("Invalid syscall number!");
+        }
+        let mut inner = self.inner.exclusive_access();
+        let crt = inner.current_task;
+        inner.tasks[crt].syscall_times[callno] += 1;
+        drop(inner);
+    }
+
+    /// Get syscall times
+    fn get_syscall_times(&self, systab: &mut [u32; MAX_SYSCALL_NUM]) {
+        let inner = self.inner.exclusive_access();
+        let crt = inner.current_task;
+        for i in 0..MAX_SYSCALL_NUM {
+            systab[i] = inner.tasks[crt].syscall_times[i];
+        }
+        drop(inner);
+    }
+
+    ///
+    fn get_syscall_times_of(&self, id: usize) -> u32 {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].syscall_times[id]
+    }
+
+	/// mmap
+	fn pro_mmap(&self, start: usize, len: usize, port: &MapPermission) -> bool {
+		let mut inner = self.inner.exclusive_access();
+		let crt = inner.current_task;
+		let crt_memset = &mut inner.tasks[crt].memory_set;
+		info!("mmap {:#x} to {:#x}", start >> 12, (start + len) >> 12);
+		if crt_memset.if_overlap(VirtAddr::from(start), VirtAddr::from(start + len)) {
+			drop(inner);
+			return false;
+		}
+		
+		crt_memset.insert_framed_area(
+			VirtAddr::from(start),
+			VirtAddr::from(start + len),
+			*port);
+		drop(inner);
+		true
+	}
+	
+	/// munmap
+	fn pro_munmap(&self, start: usize, len: usize) -> bool {
+		let mut inner = self.inner.exclusive_access();
+		let crt = inner.current_task;
+		let crt_memset = &mut inner.tasks[crt].memory_set;
+		// info!("!!!!!!!!!!!!!{:#x}!!{:#x}", start, start + len);
+		if !crt_memset.if_matched(start, start + len) {
+			drop(inner);
+			return false;
+		}
+		crt_memset.remove_area(VirtAddr::from(VirtAddr::from(start).floor()) ,
+			VirtAddr::from(VirtAddr::from(start + len).ceil()));
+		drop(inner);
+		true
+	}
 }
 
 /// Run the first task in task list.
@@ -188,6 +266,26 @@ pub fn exit_current_and_run_next() {
     run_next_task();
 }
 
+/// Get start time (unit/ms)
+pub fn get_start_time() -> isize {
+    TASK_MANAGER.get_start_time()
+}
+
+/// Increase syscall times
+pub fn increase_syscall_times(callno: usize) {
+    TASK_MANAGER.increase_syscall_times(callno);
+}
+
+/// Get syscall times
+pub fn get_syscall_times(systab: &mut [u32; MAX_SYSCALL_NUM]) {
+    TASK_MANAGER.get_syscall_times(systab);
+}
+
+///
+pub fn get_syscall_times_of(id: usize) -> u32 {
+    TASK_MANAGER.get_syscall_times_of(id)
+}
+
 /// Get the current 'Running' task's token.
 pub fn current_user_token() -> usize {
     TASK_MANAGER.get_current_token()
@@ -201,4 +299,17 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// ...
+pub fn do_task_mmap(start: usize, len: usize, port: usize) -> bool {
+    trace!("Paging Map: {:#x}(inc) ~ {:#x}(exc)", start, start + len);
+    let mut permission = MapPermission::from_bits((port as u8) << 1).unwrap();
+    permission.set(MapPermission::U, true);
+    TASK_MANAGER.pro_mmap(start, len, &permission)
+} 
+
+/// ...
+pub fn do_task_munmap(start: usize, len: usize) -> bool {
+    TASK_MANAGER.pro_munmap(start, len)
 }
