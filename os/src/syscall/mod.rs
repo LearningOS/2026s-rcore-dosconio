@@ -74,6 +74,8 @@ pub const SYSCALL_MAIL_WRITE: usize = 402;
 pub const SYSCALL_DUP: usize = 24;
 /// pipe syscall
 pub const SYSCALL_PIPE: usize = 59;
+/// task info syscall
+pub const SYSCALL_TASK_INFO: usize = 410;
 /// thread_create syscall
 pub const SYSCALL_THREAD_CREATE: usize = 460;
 /// waittid syscall
@@ -101,12 +103,12 @@ pub const SYSCALL_CONDVAR_WAIT: usize = 473;
 
 mod fs;
 mod process;
-mod sync;
+pub(crate) mod sync;
 mod thread;
 
 use fs::*;
 use process::*;
-use sync::*;
+pub use sync::*;
 use thread::*;
 
 use crate::fs::Stat;

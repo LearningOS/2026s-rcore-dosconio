@@ -12,6 +12,7 @@ pub struct Semaphore {
 
 pub struct SemaphoreInner {
     pub count: isize,
+	/// tasks waiting for the semaphore
     pub wait_queue: VecDeque<Arc<TaskControlBlock>>,
 }
 
@@ -52,4 +53,9 @@ impl Semaphore {
             block_current_and_run_next();
         }
     }
+
+	/// bad impl
+	pub fn will_deadlock(&self) -> bool {
+		self.inner.exclusive_access().count < 1
+	}
 }
