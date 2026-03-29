@@ -26,7 +26,7 @@ use crate::fs::{open_file, OpenFlags};
 use alloc::sync::Arc;
 pub use context::TaskContext;
 use lazy_static::*;
-pub use manager::{fetch_task, TaskManager};
+pub use manager::{fetch_task, TaskManager, TASK_MANAGER};
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
 
@@ -34,8 +34,13 @@ pub use id::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
 pub use manager::add_task;
 pub use processor::{
     current_task, current_trap_cx, current_user_token, run_tasks, schedule, take_current_task,
-    Processor,
+    Processor, PROCESSOR
 };
+use crate::config::*;
+use crate::mm::MapPermission;
+use crate::mm::VirtAddr;
+
+
 /// Suspend the current 'Running' task and run the next task in task list.
 pub fn suspend_current_and_run_next() {
     // There must be an application running.
@@ -46,6 +51,7 @@ pub fn suspend_current_and_run_next() {
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
     // Change status to Ready
     task_inner.task_status = TaskStatus::Ready;
+	task_inner.task_stride = (task_inner.task_stride + BIG_STRIDE / task_inner.task_priority) % BIG_STRIDE;
     drop(task_inner);
     // ---- release current PCB
 
@@ -119,4 +125,69 @@ lazy_static! {
 ///Add init process to the manager
 pub fn add_initproc() {
     add_task(INITPROC.clone());
+}
+
+
+// ---- BELOW ARE INTERFACES ----
+//{?} take_current_task()
+
+/// Get start time (unit/ms)
+#[allow(warnings)]
+pub fn get_start_time() -> isize {
+    let crt = current_task().unwrap();
+    let res = crt.inner_exclusive_access();
+    // info!(" start time: {}.", res.start_time);
+    res.start_time
+}
+
+/// Increase syscall times
+pub fn increase_syscall_times(callno: usize) {
+    if callno >= MAX_SYSCALL_NUM {
+        panic!("Invalid syscall number!");
+    }
+    let crt = current_task().unwrap();
+    let mut res = crt.inner_exclusive_access();
+    res.syscall_times[callno] += 1;
+}
+
+/// Get syscall times
+pub fn get_syscall_times(systab: &mut [u32; MAX_SYSCALL_NUM]) {
+    let crt = current_task().unwrap();
+    let res = crt.inner_exclusive_access();
+    for i in 0..MAX_SYSCALL_NUM {
+        systab[i] = res.syscall_times[i];
+        if systab[i] > 0 {
+            info!("Syscall {} times: {}", i, systab[i]);
+        }
+    }
+}
+
+/// ...
+pub fn do_task_mmap(start: usize, len: usize, port: usize) -> bool {
+    trace!("Paging Map: {:#x}(inc) ~ {:#x}(exc)", start, start + len);
+    let mut port = MapPermission::from_bits((port as u8) << 1).unwrap();
+    port.set(MapPermission::U, true);
+    let crt = current_task().unwrap();
+    let mut res = crt.inner_exclusive_access();
+    let crt_memset = &mut res.memory_set;
+    let state: bool = !crt_memset.if_overlap(VirtAddr::from(start), VirtAddr::from(start + len));
+    if state {
+        crt_memset.insert_framed_area(
+            VirtAddr::from(start), VirtAddr::from(start + len), port);
+    }
+    state
+} 
+
+/// ...
+pub fn do_task_munmap(start: usize, len: usize) -> bool {
+    trace!("Paging Unmap: {:#x}(inc) ~ {:#x}(exc)", start, start + len);
+    let crt = current_task().unwrap();
+    let mut res = crt.inner_exclusive_access();
+    let crt_memset = &mut res.memory_set;
+    let state: bool = crt_memset.if_matched(start, start + len);
+    if state {
+        crt_memset.remove_area(VirtAddr::from(VirtAddr::from(start).floor()) ,
+        VirtAddr::from(VirtAddr::from(start + len).ceil()));
+    }
+    state
 }
