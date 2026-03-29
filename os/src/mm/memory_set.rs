@@ -1,9 +1,14 @@
 //! Implementation of [`MapArea`] and [`MemorySet`].
+
+#![allow(warnings)]//{TEMP}
+
 use super::{frame_alloc, FrameTracker};
 use super::{PTEFlags, PageTable, PageTableEntry};
 use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use super::{StepByOne, VPNRange};
-use crate::config::{MEMORY_END, PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT_BASE, USER_STACK_SIZE};
+use crate::config::{
+    KERNEL_STACK_SIZE, MEMORY_END, PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT_BASE, USER_STACK_SIZE,
+};
 use crate::sync::UPSafeCell;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -300,6 +305,57 @@ impl MemorySet {
             false
         }
     }
+
+    /// if the range is reflected
+    pub fn if_overlap(&self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let start_va: VirtPageNum = start_va.floor();
+        let end_va: VirtPageNum = end_va.ceil();
+        for i in self.areas.iter() {
+            if i.vpn_range.get_start().0 >= end_va.0 || i.vpn_range.get_end().0 <= start_va.0 {
+            } else {
+                // info!("mem-overlap");
+                return true;
+            }
+        }
+        false
+    }
+
+    /// all overlap
+    pub fn if_matched(&self, start: usize, end: usize) -> bool {
+        for i in self.areas.iter() {
+            if i.vpn_range.get_start().0<<12 == start && i.vpn_range.get_end().0<<12 == end {
+                return true;
+            }
+        }
+        false
+    }
+
+    ///
+    pub fn remove_area(&mut self, start_va: VirtAddr, end_va: VirtAddr) {
+        // preset end_va >= start_va
+        let start_va: VirtPageNum = start_va.floor();
+        let end_va: VirtPageNum = end_va.ceil();
+        info!("umap since {} in total, from {:#x} to {:#x}", self.areas.len(), start_va.0, end_va.0);
+        let mut i = 0;
+        loop { 
+            if i >= self.areas.len() {
+                break;
+            }
+            let vpn_range = self.areas[i].vpn_range;
+            if vpn_range.get_start().0 == start_va.0 && vpn_range.get_end().0 == end_va.0 {
+                info!("     found {}", i);
+                self.areas[i].unmap(&mut self.page_table);
+                // let mut a : Vec<i32> = Vec::new(); a.push(1); a.drain(0..1);
+                self.areas.drain(i..i+1);
+                
+                //self.areas.remove(i);
+                break;
+            } else {
+                i += 1;
+            }
+        }
+    }
+
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
@@ -348,6 +404,7 @@ impl MapArea {
         let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
         page_table.map(vpn, ppn, pte_flags);
     }
+    #[allow(unused)]
     pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         if self.map_type == MapType::Framed {
             self.data_frames.remove(&vpn);
@@ -359,6 +416,7 @@ impl MapArea {
             self.map_one(page_table, vpn);
         }
     }
+    #[allow(unused)]
     pub fn unmap(&mut self, page_table: &mut PageTable) {
         for vpn in self.vpn_range {
             self.unmap_one(page_table, vpn);
@@ -421,6 +479,13 @@ bitflags! {
         ///Accessible in U mode
         const U = 1 << 4;
     }
+}
+
+/// Return (bottom, top) of a kernel stack in kernel space.
+pub fn kernel_stack_position(app_id: usize) -> (usize, usize) {
+    let top = TRAMPOLINE - app_id * (KERNEL_STACK_SIZE + PAGE_SIZE);
+    let bottom = top - KERNEL_STACK_SIZE;
+    (bottom, top)
 }
 
 /// remap test in kernel space
